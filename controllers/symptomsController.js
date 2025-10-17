@@ -1,5 +1,5 @@
 // backend/controllers/symptomsController.js
-import Symptoms from "../models/symptoms";
+import Symptoms from "../models/symptoms.js";
 
 /**
  * @desc Create or update symptoms for a given date

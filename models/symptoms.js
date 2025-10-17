@@ -1,4 +1,3 @@
-// backend/models/Symptoms.js
 import mongoose from "mongoose";
 
 /**
