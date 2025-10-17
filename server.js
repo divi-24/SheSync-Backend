@@ -3,6 +3,7 @@ import express from 'express';
 import mongoose from 'mongoose';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
+import userRoutes from './routes/user.js';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import globalRoutes from './routes/globalRoutes.js';
@@ -21,7 +22,8 @@ import periodTrackerRoutes from './routes/periodTrackerRoutes.js';
 import Message from './models/Message.js';
 import GlobalMessage from './models/GlobalMessage.js';
 import Community from './models/Community.js';
-
+import { authMiddleware } from './middleware/auth.js';
+import { getCachedContext } from './services/contextCacheService.js';
 dotenv.config();
 
 const app = express();
@@ -61,6 +63,19 @@ app.use("/api/posts", postRoutes);
 app.use("/api/global", globalRoutes);
 app.use("/api/waitlist", waitlistRoutes);
 app.use("/api/period-tracker", periodTrackerRoutes);
+
+
+
+app.use('/api/user', userRoutes);
+app.get('/api/context/aggregate', authMiddleware, async (req, res) => {
+  try {
+    const data = await getCachedContext(req.user.id);
+    res.json({ success: true, data });
+  } catch (e) {
+    console.error('[aggregate] error', e);
+    res.status(500).json({ success: false, message: 'Failed to aggregate context' });
+  }
+});
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 

@@ -366,3 +366,172 @@ For support and questions:
 **Happy Coding! 🎉**
 
 The SheSync Period Tracker API is now ready for production use with comprehensive health tracking capabilities!
+
+## 🧠 Hybrid Context Memory System (New)
+
+This system builds a privacy-first, AI-ready memory of each user's health context by combining snapshotting, change detection, hybrid summarization (rule-based + Gemini), and vector memory retrieval.
+
+### Why this exists
+
+- Keep a current, consent-aware context snapshot per user for fast access.
+- Detect meaningful changes to the context and compress historical state into human-readable memories.
+- Enable retrieval over past summaries using vector similarity (MongoDB Atlas Vector Search) for better personalization.
+
+### Key properties
+
+- Privacy-first: honors `User.aiConsent`; sensitive fields are excluded when consent is false.
+- Hybrid: rule-based stats → AI 2–3 sentence narrative → vector embedding.
+- Resilient: no-AI fallbacks for both summarization and embeddings ensure pipeline still works.
+- Modular: clean separation of concerns across services.
+
+---
+
+### Architecture overview
+
+Files and their responsibilities:
+
+- Models
+
+  - `models/ContextSnapshot.js`
+    - Latest aggregated context per user, with a stable SHA256 `hash` for change detection.
+    - Schema: `{ userId, context: Mixed, hash: String, updatedAt }` (unique per userId).
+  - `models/ContextMemory.js`
+    - Historical memories: compressed narrative + numeric embedding for vector search.
+    - Schema: `{ userId, summaryText, embedding: [Number], createdAt, meta?: { sourceHash, stats } }`.
+
+- Services (Context)
+  - `services/context/contextAggregator.js`
+    - Re-exports `getAggregatedContext` from the main aggregator to keep modular structure.
+  - `services/contextAggregator.js` (existing)
+    - Aggregates from `Cycle`, `Symptoms`, and `PeriodTracker`.
+    - Applies consent gating (excludes sensitive fields if `aiConsent` is false).
+    - Ensures derived fields: `cycleAnalysis`, `periodAnalysis`, `daysUntilNextPeriod`.
+  - `services/context/contextComparator.js`
+    - Stable JSON canonicalization (sorted keys) and `hashContext` (SHA256).
+    - `hasSignificantChange(prevHash, nextHash)` → boolean.
+  - `services/context/contextSnapshotCache.js`
+    - `getLastSnapshot(userId)` → returns `{ context, hash, updatedAt } | null`.
+    - `saveSnapshot(userId, context, hash)` → upserts latest snapshot.
+  - `services/context/contextArchiver.js`
+    - `computeStats(prevContext)` → rule-based compression/stats: avg cycle length, irregularity, symptom frequency, days until next period.
+    - `archivePreviousSnapshot(userId, sourceHash, prevContext)` → create summary, embed it, store in `ContextMemory`.
+  - `services/context/summarizerService.js`
+    - Uses `@google/generative-ai` (Gemini 1.5 Flash) for 2–3 sentence narratives.
+    - If `GEMINI_API_KEY` missing or errors occur, uses a deterministic fallback text.
+  - `services/context/vectorMemoryService.js`
+    - Creates embeddings via `@google/generative-ai` (default `text-embedding-004`).
+    - Fallback: deterministic hashing-based numeric embedding.
+    - Vector search via MongoDB Atlas `$vectorSearch` (if configured), else cosine similarity in JS over recent memories.
+  - `services/context/orchestrator.js`
+    - Runs the whole pipeline: aggregate → compare → archive (if changed) → upsert snapshot → return context.
+
+---
+
+### Data flow (pipeline)
+
+1. Aggregate: Fetch latest, consent-aware context (Cycle, Symptoms, PeriodTracker; add deriveds).
+2. Hash: Canonicalize JSON and compute SHA256.
+3. Compare: Check against previous snapshot hash.
+4. Archive (only if changed):
+   - Rule-based stats/trends
+   - 2–3 sentence summary (Gemini or fallback)
+   - Embedding (Gemini or fallback)
+   - Store in `ContextMemory`
+5. Save: Upsert new snapshot (`ContextSnapshot`)
+6. Return: Latest context + change status (+ archived doc if created)
+
+---
+
+### Environment variables (additional)
+
+Add these to your `.env` (in addition to the ones listed earlier):
+
+```env
+# Google Generative AI
+GEMINI_API_KEY=your-google-generative-ai-key
+GEMINI_MODEL=gemini-1.5-flash            # optional, default shown
+GEMINI_EMBEDDING_MODEL=text-embedding-004 # optional, default shown
+```
+
+Note: If `GEMINI_API_KEY` is not set, the system uses robust fallbacks for both summarization and embeddings.
+
+---
+
+### Setup
+
+1. Install dependencies (from `backend/` directory):
+
+```powershell
+npm install
+```
+
+2. Ensure MongoDB Atlas (or local) is configured and `MONGO_URI` is set.
+
+3. Optional: Configure a MongoDB Atlas Vector Index for `ContextMemory.embedding`.
+
+   - Create a vector index named `context_memory_embedding_index` on the `embedding` path.
+   - Set `numDimensions` to match your embedding model's output size. To confirm the dimension, log `embedding.length` after a run.
+
+---
+
+### Using the orchestrator (programmatic)
+
+```js
+// Example usage inside a controller or job
+import { runContextPipeline } from "./services/context/orchestrator.js";
+
+// userId is a Mongo ObjectId or a string
+const { context, changed, archived } = await runContextPipeline(userId);
+// context: latest aggregated, consent-aware context JSON
+// changed: boolean indicating whether snapshot changed vs previous
+// archived: the ContextMemory doc created when a change was detected (if any)
+```
+
+Optional Express route (not included by default):
+
+```js
+router.post("/api/context/run", auth, async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    const result = await runContextPipeline(userId);
+    res.json(result);
+  } catch (e) {
+    next(e);
+  }
+});
+```
+
+### Querying vector memories (programmatic)
+
+```js
+import {
+  embedText,
+  queryMemories,
+} from "./services/context/vectorMemoryService.js";
+
+const query = "cramps and sleep patterns this month";
+const vec = await embedText(query);
+const topK = await queryMemories(userId, vec, 5);
+// Returns top-k summaries with scores (Atlas) or cosine scores (fallback)
+```
+
+---
+
+### Privacy and consent
+
+- If `User.aiConsent` is false or missing, sensitive fields (e.g., notes, fertility windows, tracking arrays, health tips) are excluded at aggregation time.
+- Stored summaries are compressed narratives; embeddings are numeric vectors.
+
+### Error handling and fallbacks
+
+- Summarization fallback: deterministic 2–3 sentence generation from rule-based stats.
+- Embedding fallback: deterministic hashing-based vector.
+- Vector search fallback: cosine similarity over recent memories if Atlas `$vectorSearch` is unavailable.
+
+---
+
+### Short flowchart (arrow form)
+
+Aggregate Context → Hash → Compare → [Changed?]
+→ Yes → Compress Stats → Summarize (Gemini/fallback) → Embed (Gemini/fallback) → Store ContextMemory
+→ Save New Snapshot → Return Latest Context
