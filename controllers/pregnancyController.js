@@ -1,4 +1,4 @@
-import Pregnancy from "../models/Pregnancy.js";
+import Pregnancy from "../models/pregnancy.js";
 
 /**
  * @desc Create a new pregnancy record
